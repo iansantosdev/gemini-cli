@@ -1,4 +1,4 @@
-name: gemini-cli
+name: Build and Publish Gemini CLI
 
 on:
   schedule:
@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-push:
+  release:
+    name: Build and Release
     runs-on: ubuntu-latest
     permissions:
       contents: read
