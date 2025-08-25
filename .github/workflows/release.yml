@@ -20,13 +20,17 @@ jobs:
       - name: Get latest Gemini CLI release version
         id: get_latest_release
         run: |
-          LATEST_TAG=$(curl -s "https://api.github.com/repos/google-gemini/gemini-cli/releases/latest" | grep -Po '"tag_name": "v\K[0-9.]+')
-          if [ -z "$LATEST_TAG" ]; then
+          GITHUB_RELEASE_JSON=$(curl -s "https://api.github.com/repos/google-gemini/gemini-cli/releases/latest")
+          LATEST_VERSION_TAG=$(echo "$GITHUB_RELEASE_JSON" | grep -Po '"tag_name": "\K[^"]+')
+          if [ -z "$LATEST_VERSION_TAG" ]; then
             echo "Could not find latest release tag."
             exit 1
           fi
-          echo "Latest release tag is $LATEST_TAG"
-          echo "version=$LATEST_TAG" >> $GITHUB_OUTPUT
+          SEMANTIC_VERSION_TAG=$(echo "$LATEST_VERSION_TAG" | grep -Po '^v\K[0-9]+\.[0-9]+\.[0-9]+')
+          echo "Release tag: $LATEST_VERSION_TAG"
+          echo "Semantic tag: $SEMANTIC_VERSION_TAG"
+          echo "latest_version_tag=$LATEST_VERSION_TAG" >> $GITHUB_OUTPUT
+          echo "semantic_version_tag=$SEMANTIC_VERSION_TAG" >> $GITHUB_OUTPUT
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -35,24 +39,43 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if image already exists
+      - name: Check if image needs to be updated
         id: check_image
         run: |
-          docker manifest inspect ghcr.io/iansantosdev/gemini-cli:${{ steps.get_latest_release.outputs.version }}
-        continue-on-error: true
+          IMAGE_NEEDS_UPDATE="true"
+          IMAGE="ghcr.io/iansantosdev/gemini-cli:${{ steps.get_latest_release.outputs.semantic_version_tag }}"
 
-      - name: Build and push Docker image
-        if: steps.check_image.outcome == 'failure'
+          echo "Checking if image $IMAGE exists and is up-to-date..."
+          DOCKER_MANIFEST=$(skopeo inspect "docker://$IMAGE" 2>/dev/null || echo "")
+
+          if [ -n "$DOCKER_MANIFEST" ]; then
+            CURRENT_IMAGE_VERSION=$(echo "$DOCKER_MANIFEST" | grep -Po '"org\.opencontainers\.image\.version":\s*"\K[^"]+' || echo "")
+
+            echo "Found existing image with version: '${CURRENT_IMAGE_VERSION:-<none>}'"
+            echo "Expected version: '${{ steps.get_latest_release.outputs.latest_version_tag }}'"
+
+            if [ -n "$CURRENT_IMAGE_VERSION" ] && [ "$CURRENT_IMAGE_VERSION" = "${{ steps.get_latest_release.outputs.latest_version_tag }}" ]; then
+              IMAGE_NEEDS_UPDATE="false"
+              echo "✅ Image is already up-to-date with release ${{ steps.get_latest_release.outputs.latest_version_tag }}. Skipping build."
+            else
+              echo "🔄 Image needs update. Building new image for release ${{ steps.get_latest_release.outputs.latest_version_tag }}."
+            fi
+          else
+            echo "🆕 Image does not exist. Building new image for release ${{ steps.get_latest_release.outputs.latest_version_tag }}."
+          fi
+
+          echo "needs_update=$IMAGE_NEEDS_UPDATE" >> $GITHUB_OUTPUT
+
+      - name: Build and push image
+        if: steps.check_image.outputs.needs_update == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ghcr.io/iansantosdev/gemini-cli:${{ steps.get_latest_release.outputs.version }}
+            ghcr.io/iansantosdev/gemini-cli:${{ steps.get_latest_release.outputs.semantic_version_tag }}
             ghcr.io/iansantosdev/gemini-cli:latest
           build-args: |
-            GEMINI_VERSION=${{ steps.get_latest_release.outputs.version }}
-
-      - name: Image already exists
-        if: steps.check_image.outcome != 'failure'
-        run: echo "Image with tag ${{ steps.get_latest_release.outputs.version }} already exists. Skipping build."
+            GEMINI_VERSION=${{ steps.get_latest_release.outputs.latest_version_tag }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.get_latest_release.outputs.latest_version_tag }}
